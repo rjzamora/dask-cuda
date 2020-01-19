@@ -58,13 +58,15 @@ def get_random_ddf(chunk_size, num_chunks, args):
 
 
 def run(args, write_profile=None):
+    num_chunks = args.n_workers * args.chunks_per_worker
+
     # Generate random Dask dataframe
-    ddf_base = get_random_ddf(args.chunk_size, args.n_workers, args).persist()
+    ddf_base = get_random_ddf(args.chunk_size, num_chunks, args).persist()
 
     # If desired, calculate divisions separtately
     if args.known_divisions:
         divisions = ddf_base['key']._repartition_quantiles(
-            args.n_workers, upsample=1.0
+            num_chunks, upsample=1.0
         ).compute().to_list()
     else:
         divisions = None
@@ -218,6 +220,12 @@ def parse_args():
         metavar="n",
         type=int,
         help="Chunk size (default 1_000_000)",
+    )
+    parser.add_argument(
+        "--chunks-per-worker",
+        default=1,
+        type=int,
+        help="Chunks per worker (default 1)",
     )
     parser.add_argument(
         "--ignore-size",
