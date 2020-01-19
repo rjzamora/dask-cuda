@@ -167,6 +167,7 @@ def main(args):
     print("Sort (set_index) benchmark")
     print("-------------------------------")
     print(f"Chunk-size  | {args.chunk_size}")
+    print(f"Chunk-count | {args.n_workers*args.chunks_per_worker}")
     print(f"Divisions   | {args.known_divisions}")
     print(f"Ignore-size | {format_bytes(args.ignore_size)}")
     print(f"Protocol    | {args.protocol}")
