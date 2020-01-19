@@ -60,10 +60,6 @@ def get_random_ddf(chunk_size, num_chunks, args):
 def run(args, write_profile=None):
     # Generate random Dask dataframe
     ddf_base = get_random_ddf(args.chunk_size, args.n_workers, args).persist()
-    wait(ddf_base)
-
-    assert(len(ddf_base.dtypes) == 2)
-    data_processed = len(ddf_base) * sum([t.itemsize for t in ddf_base.dtypes])
 
     # If desired, calculate divisions separtately
     if args.known_divisions:
@@ -73,11 +69,16 @@ def run(args, write_profile=None):
     else:
         divisions = None
 
+    wait(ddf_base)
+    assert(len(ddf_base.dtypes) == 2)
+    data_processed = len(ddf_base) * sum([t.itemsize for t in ddf_base.dtypes])
+
     # Lazy set_index operation
     ddf_sorted = ddf_base.set_index(
         "key",
         npartitions=ddf_base.npartitions,
         divisions=divisions,
+        compute=False,
     )
 
     # Execute the operations to benchmark
