@@ -1,6 +1,5 @@
 import time
 import uuid
-import random
 import asyncio
 import concurrent.futures
 
@@ -168,18 +167,12 @@ class CommsContext:
                 )
             )
 
-        # Find all workers that have some part of the input dataframes
-        workers = set()
-        for df_parts in df_parts_list:
-            for w in df_parts.keys():
-                workers.add(w)
-
+        # Submit `coroutine` on each worker given the df_parts that
+        # belong the specific worker as input
         ret = []
-        for worker in workers:
+        for worker in self.worker_addresses:
             dfs = []
             for df_parts in df_parts_list:
                 dfs.append(df_parts.get(worker, []))
-            ret.append(
-                self.submit(worker, coroutine, *dfs, *extra_args, random.random())
-            )
+            ret.append(self.submit(worker, coroutine, *dfs, *extra_args))
         return utils.dataframes_to_dask_dataframe(ret)
