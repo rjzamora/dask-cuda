@@ -9,6 +9,7 @@ from dask.distributed import Client, performance_report, wait
 from dask.utils import format_bytes, format_time, parse_bytes
 from dask_cuda import LocalCUDACluster
 from dask_cuda.initialize import initialize
+from dask_cuda import explicit_comms
 
 import cudf
 import cupy
@@ -57,24 +58,8 @@ def get_random_ddf(chunk_size, num_chunks, args):
     return new_dd_object(graph, name, meta, divisions)
 
 
-def run(args, write_profile=None):
-    num_chunks = args.n_workers * args.chunks_per_worker
 
-    # Generate random Dask dataframe
-    ddf_base = get_random_ddf(args.chunk_size, num_chunks, args).persist()
-
-    # If desired, calculate divisions separtately
-    if args.known_divisions:
-        divisions = ddf_base['key']._repartition_quantiles(
-            num_chunks, upsample=1.0
-        ).compute().to_list()
-    else:
-        divisions = None
-
-    wait(ddf_base)
-    assert(len(ddf_base.dtypes) == 2)
-    data_processed = len(ddf_base) * sum([t.itemsize for t in ddf_base.dtypes])
-
+def set_index(args, ddf_base, divisions, write_profile):
     # Lazy set_index operation
     ddf_sorted = ddf_base.set_index(
         "key",
@@ -93,6 +78,46 @@ def run(args, write_profile=None):
         t1 = clock()
         wait(ddf_sorted.persist())
         took = clock() - t1
+    return took
+
+
+def set_index_explicit_comms(args, ddf_base, divisions):
+    t1 = clock()
+    wait(
+        explicit_comms.dataframe_set_index(
+            ddf_base, "key", divisions=divisions
+        ).persist()
+    )
+    took = clock() - t1
+    return took
+
+
+def run(client, args, write_profile=None):
+    num_chunks = args.n_workers * args.chunks_per_worker
+
+    # Generate random Dask dataframe
+    ddf_base = get_random_ddf(args.chunk_size, num_chunks, args).persist()
+
+    # If desired, calculate divisions separtately
+    # (must do this for now if not using dask backend)
+    if args.known_divisions or args.backend != "dask":
+        divisions = ddf_base['key']._repartition_quantiles(
+            num_chunks, upsample=1.0
+        ).compute().to_list()
+    else:
+        divisions = None
+
+    wait(ddf_base)
+    #client.wait_for_workers(args.n_workers)
+
+    assert(len(ddf_base.dtypes) == 2)
+    data_processed = len(ddf_base) * sum([t.itemsize for t in ddf_base.dtypes])
+
+    if args.backend == "dask":
+        took = set_index(args, ddf_base, divisions, write_profile)
+    else:
+        took = set_index_explicit_comms(args, ddf_base, divisions)
+
     return (data_processed, took)
 
 
@@ -134,9 +159,9 @@ def main(args):
 
     took_list = []
     for _ in range(args.runs - 1):
-        took_list.append(run(args, write_profile=None))
+        took_list.append(run(client, args, write_profile=None))
     took_list.append(
-        run(args, write_profile=args.profile)
+        run(client, args, write_profile=args.profile)
     )  # Only profiling the last run
 
     # Collect, aggregate, and print peer-to-peer bandwidths
@@ -166,37 +191,41 @@ def main(args):
         print("```")
     print("Sort (set_index) benchmark")
     print("-------------------------------")
-    print(f"Chunk-size  | {args.chunk_size}")
-    print(f"Chunk-count | {args.n_workers*args.chunks_per_worker}")
-    print(f"Divisions   | {args.known_divisions}")
-    print(f"Ignore-size | {format_bytes(args.ignore_size)}")
-    print(f"Protocol    | {args.protocol}")
-    print(f"Device(s)   | {args.devs}")
-    print(f"rmm-pool    | {(not args.no_rmm_pool)}")
+    print(f"chunk-count    | {args.n_workers*args.chunks_per_worker}")
+    print(f"backend        | {args.backend}")
+    print(f"rows-per-chunk | {args.chunk_size}")
+    print(f"protocol       | {args.protocol}")
+    print(f"device(s)      | {args.devs}")
+    print(f"rmm-pool       | {(not args.no_rmm_pool)}")
     if args.protocol == "ucx":
-        print(f"tcp         | {args.enable_tcp_over_ucx}")
-        print(f"ib          | {args.enable_infiniband}")
-        print(f"nvlink      | {args.enable_nvlink}")
+        print(f"tcp            | {args.enable_tcp_over_ucx}")
+        print(f"ib             | {args.enable_infiniband}")
+        print(f"nvlink         | {args.enable_nvlink}")
+    print(f"data-processed | {format_bytes(took_list[0][0])}")
     print("===============================")
-    print("Wall-clock  | Throughput")
+    print("Wall-clock     | Throughput")
     print("-------------------------------")
     for data_processed, took in took_list:
         throughput = int(data_processed / took)
-        print(f"{format_time(took)}      | {format_bytes(throughput)}/s")
+        m = format_time(took)
+        m += " " * (15 - len(m))
+        print(f"{m}| {format_bytes(throughput)}/s")
     print("===============================")
     if args.markdown:
-        print(
-            "\n```\n<details>\n<summary>Worker-Worker Transfer Rates</summary>\n\n```"
-        )
-    print("(w1,w2)     | 25% 50% 75% (total nbytes)")
-    print("-------------------------------")
-    for (d1, d2), bw in sorted(bandwidths.items()):
-        print(
-            "(%02d,%02d)     | %s %s %s (%s)"
-            % (d1, d2, bw[0], bw[1], bw[2], total_nbytes[(d1, d2)])
-        )
-    if args.markdown:
-        print("```\n</details>\n")
+        print("\n```")
+
+    if args.backend == "dask":
+        if args.markdown:
+            print("<details>\n<summary>Worker-Worker Transfer Rates</summary>\n\n```")
+        print("(w1,w2)     | 25% 50% 75% (total nbytes)")
+        print("-------------------------------")
+        for (d1, d2), bw in sorted(bandwidths.items()):
+            print(
+                "(%02d,%02d)     | %s %s %s (%s)"
+                % (d1, d2, bw[0], bw[1], bw[2], total_nbytes[(d1, d2)])
+            )
+        if args.markdown:
+            print("```\n</details>\n")
 
 
 def parse_args():
@@ -213,6 +242,14 @@ def parse_args():
         default="tcp",
         type=str,
         help="The communication protocol to use.",
+    )
+    parser.add_argument(
+        "-b",
+        "--backend",
+        choices=["dask", "explicit-comms"],
+        default="dask",
+        type=str,
+        help="The backend to use.",
     )
     parser.add_argument(
         "-c",
