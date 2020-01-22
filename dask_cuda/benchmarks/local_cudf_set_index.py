@@ -59,12 +59,11 @@ def get_random_ddf(chunk_size, num_chunks, args):
 
 
 
-def set_index(args, ddf_base, divisions, write_profile):
+def set_index(args, ddf_base, write_profile):
     # Lazy set_index operation
     ddf_sorted = ddf_base.set_index(
         "key",
         npartitions=ddf_base.npartitions,
-        divisions=divisions,
         compute=False,
     )
 
@@ -81,11 +80,11 @@ def set_index(args, ddf_base, divisions, write_profile):
     return took
 
 
-def set_index_explicit_comms(args, ddf_base, divisions):
+def set_index_explicit_comms(args, ddf_base, n_workers):
     t1 = clock()
     wait(
         explicit_comms.dataframe_set_index(
-            ddf_base, "key", divisions=divisions
+            ddf_base, "key", n_workers=n_workers
         ).persist()
     )
     took = clock() - t1
@@ -98,25 +97,16 @@ def run(client, args, write_profile=None):
     # Generate random Dask dataframe
     ddf_base = get_random_ddf(args.chunk_size, num_chunks, args).persist()
 
-    # If desired, calculate divisions separtately
-    # (must do this for now if not using dask backend)
-    if args.known_divisions or args.backend != "dask":
-        divisions = ddf_base['key']._repartition_quantiles(
-            num_chunks, upsample=1.0
-        ).compute().to_list()
-    else:
-        divisions = None
-
     wait(ddf_base)
-    #client.wait_for_workers(args.n_workers)
+    # client.wait_for_workers(args.n_workers)
 
     assert(len(ddf_base.dtypes) == 2)
     data_processed = len(ddf_base) * sum([t.itemsize for t in ddf_base.dtypes])
 
     if args.backend == "dask":
-        took = set_index(args, ddf_base, divisions, write_profile)
+        took = set_index(args, ddf_base, write_profile)
     else:
-        took = set_index_explicit_comms(args, ddf_base, divisions)
+        took = set_index_explicit_comms(args, ddf_base, args.n_workers)
 
     return (data_processed, took)
 
@@ -324,11 +314,6 @@ def parse_args():
     )
     parser.set_defaults(
         enable_tcp_over_ucx=True, enable_infiniband=True, enable_nvlink=True
-    )
-    parser.add_argument(
-        "--known-divisions",
-        action="store_true",
-        help="Calculate divisions before set_index operation",
     )
     args = parser.parse_args()
     args.n_workers = len(args.devs.split(","))

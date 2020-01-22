@@ -79,7 +79,9 @@ async def distributed_rearrange_and_set_index(
     return df.set_index(index, drop=drop).drop(partitions_col).sort_index()
 
 
-async def _rearrange_and_set_index(s, df_parts, index, partitions_col, drop, r):
+async def _rearrange_and_set_index(
+    s, df_parts, index, partitions_col, drop
+):
     def df_concat(df_parts):
         """Making sure df_parts is a single dataframe or None"""
         if len(df_parts) == 0:
@@ -104,6 +106,7 @@ def dataframe_set_index(
     shuffle="tasks",
     compute=False,
     drop=True,
+    n_workers=None,
     divisions=None,
     **kwargs
 ):
@@ -113,14 +116,14 @@ def dataframe_set_index(
             "Index must be column name (for now).\n"
         )
 
-    if divisions == None:
+    if divisions:
         raise NotImplementedError(
-            "Must provide output divisions (for now).\n"
+            "Cannot accept divisions argument (for now).\n"
         )
 
-    if npartitions and npartitions != df.npartitions:
+    if n_workers == None:
         raise NotImplementedError(
-            "Input and output partition count must match (for now).\n"
+            "Must provide n_workers to calculate divisions.\n"
         )
 
     if shuffle != "tasks":
@@ -133,6 +136,17 @@ def dataframe_set_index(
             "compute=True argument not supported (row now).\n"
         )
 
+    if npartitions and npartitions != df.npartitions:
+        raise NotImplementedError(
+            "Input partitions must equal output partitions (for now).\n"
+        )
+    npartitions = df.npartitions
+
+    # Calculate divisions for n_workers (not npartitions)
+    divisions = df[index]._repartition_quantiles(
+        n_workers, upsample=1.0
+    ).compute().to_list()
+
     # Construct and Assign a new "_partitions" column
     # defining new partition for every row...
     meta = df._meta._constructor_sliced([0])
@@ -142,6 +156,14 @@ def dataframe_set_index(
     df = df.assign(_partitions=partitions)
     df.persist()
 
-    return comms.default_comms().dataframe_operation(
-        _rearrange_and_set_index, df_list=(df,), extra_args=(index, "_partitions", drop)
+    # Explict-comms shuffle and local set_index
+    df_out = comms.default_comms().dataframe_operation(
+        _rearrange_and_set_index,
+        df_list=(df,),
+        extra_args=(index, "_partitions", drop)
     )
+
+    # Final repartition (should be fast - intra-worker partitioning)
+    if n_workers != npartitions:
+        return df_out.repartition(npartitions=npartitions)
+    return df_out
