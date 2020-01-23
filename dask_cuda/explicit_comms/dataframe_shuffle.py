@@ -39,10 +39,16 @@ async def recv_parts(eps, parts):
     parts.extend(await asyncio.gather(*futures))
 
 
-async def exchange_and_concat_parts(rank, eps, parts):
+async def exchange_and_concat_parts(rank, eps, parts, drop=None, sort=False):
     ret = [parts[rank]]
     await asyncio.gather(recv_parts(eps, ret), send_parts(eps, parts))
-    return concat([df for df in ret if df is not None])
+    if drop:
+        df = concat([df.drop(columns=drop) for df in ret if df is not None])
+    else:
+        df = concat([df for df in ret if df is not None])
+    if sort:
+        return df.sort_values(sort)
+    return df
 
 
 def concat(df_list):
@@ -75,8 +81,10 @@ async def distributed_rearrange_and_set_index(
     n_chunks, rank, eps, table, index, partitions_col, drop
 ):
     parts = partition_by_column(table, partitions_col, n_chunks)
-    df = await exchange_and_concat_parts(rank, eps, parts)
-    return df.set_index(index, drop=drop).drop(partitions_col).sort_index()
+    df = await exchange_and_concat_parts(
+        rank, eps, parts, drop=partitions_col, sort=index
+    )
+    return df.set_index(index, drop=drop)
 
 
 async def _rearrange_and_set_index(
@@ -93,7 +101,6 @@ async def _rearrange_and_set_index(
 
     df = df_concat(df_parts)
 
-    # TODO: Make this work with output partitions > nworkers
     return await distributed_rearrange_and_set_index(
         s["nworkers"], s["rank"], s["eps"], df, index, partitions_col, drop
     )
