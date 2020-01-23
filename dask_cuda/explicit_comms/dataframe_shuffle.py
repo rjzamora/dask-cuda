@@ -102,9 +102,11 @@ async def _set_index(
 
     divisions = cudf.Series(divisions)
     if not scatter:
+        # Avoid `scatter_by_map` by sorting the dataframe here
+        # (Can just use iloc to split into groups)
         df = df.sort_values(index)
         splits = df[index].searchsorted(divisions, side="left")
-        splits[-1]+=1
+        #splits[-1]+=1
         partitions = splits.tolist()
     else:
         partitions = divisions.searchsorted(df[index], side="right") - 1
