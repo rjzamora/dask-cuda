@@ -99,7 +99,6 @@ def run(client, args, write_profile=None):
 
     wait(ddf_base)
     # client.wait_for_workers(args.n_workers)
-
     assert(len(ddf_base.dtypes) == 2)
     data_processed = len(ddf_base) * sum([t.itemsize for t in ddf_base.dtypes])
 

@@ -39,13 +39,10 @@ async def recv_parts(eps, parts):
     parts.extend(await asyncio.gather(*futures))
 
 
-async def exchange_and_concat_parts(rank, eps, parts, drop=None, sort=False):
+async def exchange_and_concat_parts(rank, eps, parts, sort=False):
     ret = [parts[rank]]
     await asyncio.gather(recv_parts(eps, ret), send_parts(eps, parts))
-    if drop:
-        df = concat([df.drop(columns=drop) for df in ret if df is not None])
-    else:
-        df = concat([df for df in ret if df is not None])
+    df = concat(list(filter(None, ret)))
     if sort:
         return df.sort_values(sort)
     return df
@@ -55,12 +52,6 @@ def concat(df_list):
     if len(df_list) == 0:
         return None
     return cudf.concat(df_list)
-
-
-def set_partitions_pre(s, divisions):
-    partitions = divisions.searchsorted(s, side="right") - 1
-    partitions[(s >= divisions.iloc[-1]).values] = len(divisions) - 2
-    return partitions
 
 
 def partition_by_column(df, column, n_chunks):
@@ -78,17 +69,17 @@ def partition_by_column(df, column, n_chunks):
 
 
 async def distributed_rearrange_and_set_index(
-    n_chunks, rank, eps, table, index, partitions_col, drop
+    n_chunks, rank, eps, table, partitions, index, drop
 ):
-    parts = partition_by_column(table, partitions_col, n_chunks)
+    parts = partition_by_column(table, partitions, n_chunks)
     df = await exchange_and_concat_parts(
-        rank, eps, parts, drop=partitions_col, sort=index
+        rank, eps, parts, sort=index
     )
     return df.set_index(index, drop=drop)
 
 
 async def _rearrange_and_set_index(
-    s, df_parts, index, partitions_col, drop
+    s, df_parts, index, divisions, drop
 ):
     def df_concat(df_parts):
         """Making sure df_parts is a single dataframe or None"""
@@ -99,10 +90,18 @@ async def _rearrange_and_set_index(
         else:
             return concat(df_parts)
 
+    # Concatenate all parts owned by this worker into
+    # a single cudf DataFrame
     df = df_concat(df_parts)
 
+    # Calculate "partitions" Series
+    divisions = cudf.Series(divisions)
+    partitions = divisions.searchsorted(df[index], side="right") - 1
+    partitions[(df[index] >= divisions.iloc[-1]).values] = len(divisions) - 2
+
+    # Run distributed shuffle and set_index algorithm
     return await distributed_rearrange_and_set_index(
-        s["nworkers"], s["rank"], s["eps"], df, index, partitions_col, drop
+        s["nworkers"], s["rank"], s["eps"], df, partitions, index, drop
     )
 
 
@@ -154,20 +153,11 @@ def dataframe_set_index(
         n_workers, upsample=1.0
     ).compute().to_list()
 
-    # Construct and Assign a new "_partitions" column
-    # defining new partition for every row...
-    meta = df._meta._constructor_sliced([0])
-    partitions = df[index].map_partitions(
-        set_partitions_pre, divisions=cudf.Series(divisions), meta=meta
-    )
-    df = df.assign(_partitions=partitions)
-    df.persist()
-
     # Explict-comms shuffle and local set_index
     df_out = comms.default_comms().dataframe_operation(
         _rearrange_and_set_index,
         df_list=(df,),
-        extra_args=(index, "_partitions", drop)
+        extra_args=(index, divisions, drop)
     )
 
     # Final repartition (should be fast - intra-worker partitioning)
