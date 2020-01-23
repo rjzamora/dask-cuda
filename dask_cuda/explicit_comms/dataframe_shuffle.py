@@ -69,17 +69,23 @@ def partition_by_column(df, column, n_chunks):
 
 
 async def distributed_rearrange_and_set_index(
-    n_chunks, rank, eps, table, partitions, index, drop
+    n_chunks, rank, eps, table, partitions, index, drop, scatter
 ):
-    parts = partition_by_column(table, partitions, n_chunks)
+    if scatter:
+        parts = partition_by_column(table, partitions, n_chunks)
+    else:
+        parts = [
+            table.iloc[partitions[i]:partitions[i+1]]
+            for i in range(0,len(partitions)-1)
+        ]
     df = await exchange_and_concat_parts(
         rank, eps, parts, sort=index
     )
     return df.set_index(index, drop=drop)
 
 
-async def _rearrange_and_set_index(
-    s, df_parts, index, divisions, drop
+async def _set_index(
+    s, df_parts, index, divisions, drop, scatter
 ):
     def df_concat(df_parts):
         """Making sure df_parts is a single dataframe or None"""
@@ -94,14 +100,19 @@ async def _rearrange_and_set_index(
     # a single cudf DataFrame
     df = df_concat(df_parts)
 
-    # Calculate "partitions" Series
     divisions = cudf.Series(divisions)
-    partitions = divisions.searchsorted(df[index], side="right") - 1
-    partitions[(df[index] >= divisions.iloc[-1]).values] = len(divisions) - 2
-
+    if not scatter:
+        df = df.sort_values(index)
+        splits = df[index].searchsorted(divisions, side="left")
+        splits[-1]+=1
+        partitions = splits.tolist()
+    else:
+        partitions = divisions.searchsorted(df[index], side="right") - 1
+        partitions[(df[index] >= divisions.iloc[-1]).values] = len(divisions) - 2
+    
     # Run distributed shuffle and set_index algorithm
     return await distributed_rearrange_and_set_index(
-        s["nworkers"], s["rank"], s["eps"], df, partitions, index, drop
+        s["nworkers"], s["rank"], s["eps"], df, partitions, index, drop, scatter
     )
 
 
@@ -114,6 +125,7 @@ def dataframe_set_index(
     drop=True,
     n_workers=None,
     divisions=None,
+    scatter=True,
     **kwargs
 ):
 
@@ -155,9 +167,9 @@ def dataframe_set_index(
 
     # Explict-comms shuffle and local set_index
     df_out = comms.default_comms().dataframe_operation(
-        _rearrange_and_set_index,
+        _set_index,
         df_list=(df,),
-        extra_args=(index, divisions, drop)
+        extra_args=(index, divisions, drop, scatter)
     )
 
     # Final repartition (should be fast - intra-worker partitioning)
