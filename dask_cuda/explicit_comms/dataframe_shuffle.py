@@ -106,7 +106,7 @@ async def _set_index(
         # (Can just use iloc to split into groups)
         df = df.sort_values(index)
         splits = df[index].searchsorted(divisions, side="left")
-        #splits[-1]+=1
+        splits[-1] = len(df[index])
         partitions = splits.tolist()
     else:
         partitions = divisions.searchsorted(df[index], side="right") - 1
