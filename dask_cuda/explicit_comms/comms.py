@@ -6,7 +6,6 @@ import concurrent.futures
 import numpy as np
 from distributed import get_worker, default_client, wait
 from distributed.comm.addressing import parse_host_port, parse_address, unparse_address
-from distributed.protocol import to_serialize
 import distributed.comm
 
 from . import utils
@@ -102,6 +101,8 @@ async def _stop_ucp_listeners(session_state):
 
 
 class CommsContext:
+    """Communication handler for explicit communication"""
+
     def __init__(self, client=None):
         self.client = client if client is not None else default_client()
         self.sessionId = uuid.uuid4().bytes
@@ -130,6 +131,24 @@ class CommsContext:
         self.run(_stop_ucp_listeners)
 
     def submit(self, worker, coroutine, *args, wait=False):
+        """Run a coroutine on a single worker
+
+        Parameters
+        ----------
+        worker: str
+            Worker to run the `coroutine`
+        coroutine: coroutine
+            The function to run on the worker
+        *args:
+            Arguments for `coroutine`
+        wait: boolean, optional
+            If True, waits for the coroutine to finished before returning.
+        Returns
+        -------
+        ret: object or Future
+            If wait=True, the result of `coroutine`
+            If wait=False, Future that can be waited on later.
+        """
         ret = self.client.submit(
             _run_coroutine_on_worker,
             self.sessionId,
@@ -141,6 +160,21 @@ class CommsContext:
         return ret.result() if wait else ret
 
     def run(self, coroutine, *args, workers=None):
+        """Run a coroutine on workers
+
+        Parameters
+        ----------
+        coroutine: coroutine
+            The function to run on each worker
+        *args:
+            Arguments for `coroutine`
+        workers: list, optional
+            List of workers. Default is all workers
+        Returns
+        -------
+        ret: list
+            List of the output from each worker
+        """
         if workers is None:
             workers = self.worker_addresses
         ret = []
@@ -157,7 +191,22 @@ class CommsContext:
             )
         return self.client.gather(ret)
 
-    def dataframe_operation(self, coroutine, df_list, extra_args=[]):
+    def dataframe_operation(self, coroutine, df_list, extra_args=tuple()):
+        """Submit an operation on a list of Dask dataframe
+
+        Parameters
+        ----------
+        coroutine: coroutine
+            The function to run on each worker
+        df_list: list of Dask.dataframe.Dataframe
+            Input dataframes
+        extra_args: tuple
+            Extra function input
+        Returns
+        -------
+        dataframe: Dask.dataframe.Dataframe
+            The resulting dataframe
+        """
         key = uuid.uuid1()
         df_parts_list = []
         for df in df_list:
@@ -167,6 +216,17 @@ class CommsContext:
                 )
             )
 
+        # Let's create a dict for each dataframe that specifices the
+        # number of partitions each worker has
+        dfs_nparts = []
+        for df_parts in df_parts_list:
+            nparts = {}
+            for rank, worker in enumerate(self.worker_addresses):
+                npart = len(df_parts.get(worker, []))
+                if npart > 0:
+                    nparts[rank] = npart
+            dfs_nparts.append(nparts)
+
         # Submit `coroutine` on each worker given the df_parts that
         # belong the specific worker as input
         ret = []
@@ -174,5 +234,5 @@ class CommsContext:
             dfs = []
             for df_parts in df_parts_list:
                 dfs.append(df_parts.get(worker, []))
-            ret.append(self.submit(worker, coroutine, *dfs, *extra_args))
+            ret.append(self.submit(worker, coroutine, dfs_nparts, dfs, *extra_args))
         return utils.dataframes_to_dask_dataframe(ret)
