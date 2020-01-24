@@ -84,7 +84,10 @@ def set_index_explicit_comms(args, ddf_base, n_workers):
     t1 = clock()
     wait(
         explicit_comms.dataframe_set_index(
-            ddf_base, "key", n_workers=n_workers
+            ddf_base,
+            "key",
+            n_workers=n_workers,
+            sorted_split=args.sorted_split
         ).persist()
     )
     took = clock() - t1
@@ -181,6 +184,7 @@ def main(args):
     print("Sort (set_index) benchmark")
     print("-------------------------------")
     print(f"chunk-count    | {args.n_workers*args.chunks_per_worker}")
+    print(f"sorted-split   | {args.sorted_split}")
     print(f"backend        | {args.backend}")
     print(f"rows-per-chunk | {args.chunk_size}")
     print(f"protocol       | {args.protocol}")
@@ -313,6 +317,11 @@ def parse_args():
     )
     parser.set_defaults(
         enable_tcp_over_ucx=True, enable_infiniband=True, enable_nvlink=True
+    )
+    parser.add_argument(
+        "--sorted-split",
+        action="store_true",
+        help="Use sort and split rather than scatter"
     )
     args = parser.parse_args()
     args.n_workers = len(args.devs.split(","))

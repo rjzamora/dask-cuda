@@ -55,9 +55,6 @@ def concat(df_list):
 
 
 def partition_by_column(df, column, n_chunks):
-    """Partition the dataframe by the hashed value of data in column.
-        Supports both Pandas and cuDF DataFrames
-    """
     if df is None:
         return [None] * n_chunks
     elif hasattr(df, "scatter_by_map"):
@@ -69,15 +66,15 @@ def partition_by_column(df, column, n_chunks):
 
 
 async def distributed_rearrange_and_set_index(
-    n_chunks, rank, eps, table, partitions, index, drop, scatter
+    n_chunks, rank, eps, table, partitions, index, drop, sorted_split
 ):
-    if scatter:
-        parts = partition_by_column(table, partitions, n_chunks)
-    else:
+    if sorted_split:
         parts = [
             table.iloc[partitions[i]:partitions[i+1]]
             for i in range(0,len(partitions)-1)
         ]
+    else:
+        parts = partition_by_column(table, partitions, n_chunks)
     df = await exchange_and_concat_parts(
         rank, eps, parts, sort=index
     )
@@ -85,7 +82,7 @@ async def distributed_rearrange_and_set_index(
 
 
 async def _set_index(
-    s, df_parts, index, divisions, drop, scatter
+    s, df_parts, index, divisions, drop, sorted_split
 ):
     def df_concat(df_parts):
         """Making sure df_parts is a single dataframe or None"""
@@ -101,10 +98,12 @@ async def _set_index(
     df = df_concat(df_parts)
 
     divisions = cudf.Series(divisions)
-    if not scatter:
+    if sorted_split:
         # Avoid `scatter_by_map` by sorting the dataframe here
         # (Can just use iloc to split into groups)
-        df = df.sort_values(index)
+        if len(df_parts) > 1:
+            # Need to sort again after concatenation
+            df = df.sort_values(index)
         splits = df[index].searchsorted(divisions, side="left")
         splits[-1] = len(df[index])
         partitions = splits.tolist()
@@ -114,7 +113,7 @@ async def _set_index(
     
     # Run distributed shuffle and set_index algorithm
     return await distributed_rearrange_and_set_index(
-        s["nworkers"], s["rank"], s["eps"], df, partitions, index, drop, scatter
+        s["nworkers"], s["rank"], s["eps"], df, partitions, index, drop, sorted_split
     )
 
 
@@ -127,7 +126,7 @@ def dataframe_set_index(
     drop=True,
     n_workers=None,
     divisions=None,
-    scatter=True,
+    sorted_split=False,
     **kwargs
 ):
 
@@ -162,6 +161,13 @@ def dataframe_set_index(
         )
     npartitions = df.npartitions
 
+    # Pre-sort the partitions if there is a 1:1 worker:partition ratio
+    if sorted_split and npartitions == n_workers:
+        def _sort_values(df, key):
+            return df.sort_values(key)
+        meta = _sort_values(df._meta, index)
+        df = df.map_partitions(_sort_values, index, meta=meta)
+
     # Calculate divisions for n_workers (not npartitions)
     divisions = df[index]._repartition_quantiles(
         n_workers, upsample=1.0
@@ -171,7 +177,7 @@ def dataframe_set_index(
     df_out = comms.default_comms().dataframe_operation(
         _set_index,
         df_list=(df,),
-        extra_args=(index, divisions, drop, scatter)
+        extra_args=(index, divisions, drop, sorted_split)
     )
 
     # Final repartition (should be fast - intra-worker partitioning)
