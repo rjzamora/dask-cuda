@@ -1,13 +1,10 @@
 import asyncio
-import uuid
-import numpy as np
-import pandas
 
-import rmm
-import cudf
 from distributed.protocol import to_serialize
 
-from . import comms, utils
+import cudf
+
+from . import comms
 
 
 async def send_df(ep, df):
@@ -70,20 +67,16 @@ async def distributed_rearrange_and_set_index(
 ):
     if sorted_split:
         parts = [
-            table.iloc[partitions[i]:partitions[i+1]]
-            for i in range(0,len(partitions)-1)
+            table.iloc[partitions[i] : partitions[i + 1]]
+            for i in range(0, len(partitions) - 1)
         ]
     else:
         parts = partition_by_column(table, partitions, n_chunks)
-    df = await exchange_and_concat_parts(
-        rank, eps, parts, sort=index
-    )
+    df = await exchange_and_concat_parts(rank, eps, parts, sort=index)
     return df.set_index(index, drop=drop)
 
 
-async def _set_index(
-    s, df_parts, index, divisions, drop, sorted_split
-):
+async def _set_index(s, df_nparts, df_parts, index, divisions, drop, sorted_split):
     def df_concat(df_parts):
         """Making sure df_parts is a single dataframe or None"""
         if len(df_parts) == 0:
@@ -95,7 +88,7 @@ async def _set_index(
 
     # Concatenate all parts owned by this worker into
     # a single cudf DataFrame
-    df = df_concat(df_parts)
+    df = df_concat(df_parts[0])
 
     divisions = cudf.Series(divisions)
     if sorted_split:
@@ -110,7 +103,7 @@ async def _set_index(
     else:
         partitions = divisions.searchsorted(df[index], side="right") - 1
         partitions[(df[index] >= divisions.iloc[-1]).values] = len(divisions) - 2
-    
+
     # Run distributed shuffle and set_index algorithm
     return await distributed_rearrange_and_set_index(
         s["nworkers"], s["rank"], s["eps"], df, partitions, index, drop, sorted_split
@@ -131,29 +124,21 @@ def dataframe_set_index(
 ):
 
     if not isinstance(index, str):
-        raise NotImplementedError(
-            "Index must be column name (for now).\n"
-        )
+        raise NotImplementedError("Index must be column name (for now).\n")
 
     if divisions:
-        raise NotImplementedError(
-            "Cannot accept divisions argument (for now).\n"
-        )
+        raise NotImplementedError("Cannot accept divisions argument (for now).\n")
 
-    if n_workers == None:
-        raise NotImplementedError(
-            "Must provide n_workers to calculate divisions.\n"
-        )
+    if n_workers is None:
+        raise NotImplementedError("Must provide n_workers to calculate divisions.\n")
 
     if shuffle != "tasks":
         raise NotImplementedError(
             "Task-based shuffle is required for explicit comms.\n"
         )
 
-    if compute == True:
-        raise NotImplementedError(
-            "compute=True argument not supported (row now).\n"
-        )
+    if compute:
+        raise NotImplementedError("compute=True argument not supported (row now).\n")
 
     if npartitions and npartitions != df.npartitions:
         raise NotImplementedError(
@@ -163,21 +148,21 @@ def dataframe_set_index(
 
     # Pre-sort the partitions if there is a 1:1 worker:partition ratio
     if sorted_split and npartitions == n_workers:
+
         def _sort_values(df, key):
             return df.sort_values(key)
+
         meta = _sort_values(df._meta, index)
         df = df.map_partitions(_sort_values, index, meta=meta)
 
     # Calculate divisions for n_workers (not npartitions)
-    divisions = df[index]._repartition_quantiles(
-        n_workers, upsample=1.0
-    ).compute().to_list()
+    divisions = (
+        df[index]._repartition_quantiles(n_workers, upsample=1.0).compute().to_list()
+    )
 
     # Explict-comms shuffle and local set_index
     df_out = comms.default_comms().dataframe_operation(
-        _set_index,
-        df_list=(df,),
-        extra_args=(index, divisions, drop, sorted_split)
+        _set_index, df_list=(df,), extra_args=(index, divisions, drop, sorted_split)
     )
 
     # Final repartition (should be fast - intra-worker partitioning)
