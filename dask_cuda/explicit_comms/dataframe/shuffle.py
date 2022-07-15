@@ -259,10 +259,11 @@ def shuffle(
         "explicit-comms-shuffle-group-"
         f"{tokenize(df, column_names, npartitions, ignore_index)}"
     )
-    # Convert to bag and use map_partitions so we can
-    # enable blockwise task fusion (and reduce memory)
+    # Convert to bag and use map_partitions so we can enable
+    # blockwise task fusion (if df is not alrady persisted)
     if hasattr(df._meta, "partition_by_hash"):
-
+        # Use partition_by_hash for cudf-backed data
+        # (may be faster with an rmm pool)
         def _shuffle_group(x, **kwargs):
             return {i: part for i, part in enumerate(x.partition_by_hash(**kwargs))}
 
@@ -288,9 +289,8 @@ def shuffle(
     # Compute `df_groups`, which is a list of futures, one future per partition in `df`.
     # Each future points to a dict of length `df.npartitions` that maps each
     # partition-id to a DataFrame.
-    df_groups = df_groups.compute(sync=False)
+    df_groups = df_groups.compute(sync=False, optimize=False)
     wait(df_groups)
-
     for f in df_groups:  # Check for errors
         if f.status == "error":
             f.result()  # raise exception
